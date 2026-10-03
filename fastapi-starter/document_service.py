@@ -1,32 +1,70 @@
-from threading import Lock
-from uuid import UUID, uuid4
+from typing import Annotated
+from uuid import UUID
 
-from schemas import DocumentCreate, DocumentResponse
+from fastapi import Depends
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from database import get_session
+from models import Document
+from schemas import DocumentCreate, DocumentPatch, DocumentResponse
 
 
 class DocumentService:
-    def __init__(self) -> None:
-        self._documents: dict[UUID, DocumentResponse] = {}
-        self._lock = Lock()
+    def __init__(self, session: Session) -> None:
+        self._session = session
 
     def create(self, request: DocumentCreate) -> DocumentResponse:
-        document = DocumentResponse(id=uuid4(), **request.model_dump())
-        with self._lock:
-            self._documents[document.id] = document
-        return document
+        document = Document(title=request.title, content=request.content)
+        try:
+            self._session.add(document)
+            self._session.commit()
+        except Exception:
+            self._session.rollback()
+            raise
+        return self._response(document)
 
     def list(self) -> list[DocumentResponse]:
-        with self._lock:
-            return list(self._documents.values())
+        documents = self._session.scalars(select(Document)).all()
+        return [self._response(document) for document in documents]
 
     def get(self, document_id: UUID) -> DocumentResponse | None:
-        with self._lock:
-            return self._documents.get(document_id)
+        document = self._session.get(Document, document_id)
+        return self._response(document) if document is not None else None
+
+    def update(self, document_id: UUID, request: DocumentPatch) -> DocumentResponse | None:
+        document = self._session.get(Document, document_id)
+        if document is None:
+            return None
+        changes = request.model_dump(exclude_unset=True)
+        if changes:
+            try:
+                for field, value in changes.items():
+                    setattr(document, field, value)
+                self._session.commit()
+            except Exception:
+                self._session.rollback()
+                raise
+        return self._response(document)
+
+    def delete(self, document_id: UUID) -> bool:
+        document = self._session.get(Document, document_id)
+        if document is None:
+            return False
+        try:
+            self._session.delete(document)
+            self._session.commit()
+        except Exception:
+            self._session.rollback()
+            raise
+        return True
+
+    @staticmethod
+    def _response(document: Document) -> DocumentResponse:
+        return DocumentResponse(id=document.id, title=document.title, content=document.content)
 
 
-# One service and store per worker process; both reset on restart/reload.
-_document_service = DocumentService()
-
-
-def get_document_service() -> DocumentService:
-    return _document_service
+def get_document_service(
+    session: Annotated[Session, Depends(get_session)],
+) -> DocumentService:
+    return DocumentService(session)

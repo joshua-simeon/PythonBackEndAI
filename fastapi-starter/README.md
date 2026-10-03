@@ -1,94 +1,115 @@
-# Lesson 1: Document API
+# Document API: FastAPI and PostgreSQL
 
-A small starting point for a future document ingestion / RAG service.
+Run commands below from `fastapi-starter` with the root virtual environment activated.
 
-## Run in PowerShell
+## Configuration and run
 
-Open a terminal in this folder, then run:
+This workspace uses the existing `my-postgres` PostgreSQL 16 container on localhost:5432
+and a dedicated `fastapi_documents` database. No Docker Compose file is needed.
+Start the existing container if stopped: `docker start my-postgres`.
+
+For a new checkout, copy `.env.example` to `.env` and supply your local database
+credentials. Create the database first. `.env` is ignored by Git; never commit it.
+Environment variables override `.env`. URL-encode special characters in credentials.
+The `postgresql+psycopg` scheme explicitly selects psycopg 3, not psycopg2.
 
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe -m uvicorn main:app --reload
+python -m pip install -r requirements.txt
+python -m alembic upgrade head
+python -m uvicorn main:app --reload
 ```
 
-Open http://127.0.0.1:8000/docs for the interactive Swagger UI.
-Use Ctrl+C to stop the server. Reload is for local development.
-
-## Try the API
-
-1. Call GET /health.
-2. Call POST /documents with the body below.
-3. Copy the returned id into GET /documents/{document_id}.
-4. Try an empty title: validation returns HTTP 422.
-5. Try a valid UUID that does not exist: the API returns HTTP 404.
+Open http://127.0.0.1:8000/docs. POST /documents accepts:
 
 ```json
-{
-  "title": "Company policy",
-  "content": "Employees can request reimbursement for approved training."
-}
+{"title": "Company policy", "content": "Training reimbursement policy"}
 ```
 
-## ASP.NET Core connections
+Use the returned id with GET /documents/{document_id}; GET /documents lists documents.
+GET /health returns {"status": "ok"}; it is a liveness endpoint, not a database probe.
+Invalid bodies/UUIDs return 422. An absent valid UUID returns 404 with
+{"detail": "Document not found"}. Response fields remain id, title, content.
+Listing has no defined ordering.
 
-| ASP.NET Core | This project |
+## EF Core comparisons
+
+| This project | ASP.NET Core / EF Core |
 | --- | --- |
-| Application setup / Program.cs | app = FastAPI(...) |
-| Controller / route group | routers/documents.py with APIRouter |
-| MapGet / MapPost | @router.get / @router.post |
-| Request DTO + validation attributes | Pydantic BaseModel + Field |
-| Typed response contract | response_model |
-| NotFound() | HTTPException(status_code=404, ...) |
-| Guid route parameter | document_id: UUID |
+| main.py and APIRouter modules | Program.cs and controllers/route groups |
+| schemas.py Pydantic DTOs | Request/response DTOs and validation |
+| models.py Document and Base.metadata | Entity mapping and EF model |
+| SQLAlchemy engine and pool | Shared database infrastructure / connection pool |
+| Session | DbContext: identity map, change tracking, unit of work |
+| get_session yield dependency | Scoped DbContext with disposal after request |
+| get_document_service with Depends(get_session) | Scoped service receiving DbContext |
+| session.add + session.commit | Add + SaveChanges (explicit transaction commit here) |
+| session.get / select | Find / LINQ query |
+| Alembic revision --autogenerate | dotnet ef migrations add |
+| Alembic upgrade head | dotnet ef database update |
 
-Pydantic models describe and validate data; they are not ORM entities.
-FastAPI infers the JSON body from the Pydantic parameter type and the route
-parameter from its name. The UUID annotation validates and converts the route value.
+`DocumentService` takes a Session and directly queries ORM entities. It maps them
+explicitly to the unchanged Pydantic responses. The router owns HTTP status codes
+and 404 handling. No generic repository is needed.
 
-These handlers use def because they do no asynchronous I/O. When adding an
-async HTTP or database client, use async def and await. Declaring async def
-alone does not make blocking operations asynchronous.
+The engine/session factory live for the process. Each request gets a new Session
+and DocumentService. FastAPI reuses dependency results within that request, not
+across requests. A Session must not be shared across concurrent requests. Sync
+handlers/dependencies use FastAPI's worker threads; there is no async database I/O.
 
-Storage is intentionally temporary. It resets on restart, each worker has its
-own copy, and this sample is not a production persistence layer.
+`create()` owns its transaction: commit on success, rollback and re-raise on failure.
+Commit flushes the INSERT and populates its UUID. `expire_on_commit=False` permits
+response mapping without an extra reload. The yield dependency never commits;
+closing the session releases connections and rolls back unfinished transactions,
+including read transactions. Successful writes commit before the HTTP response.
 
-## Next lessons
+PostgreSQL now owns storage: data survives API restart/reload and is shared between
+API workers. Database/container storage durability depends on its configured volume;
+do not remove the database or its data volume if you want to retain documents.
+The existing container's bootstrap credentials are used locally; a dedicated limited
+application role is a later deployment concern.
 
-1. Replace in-memory storage with database persistence.
-2. Add database persistence and meaningful integration tests.
-3. Add configuration, authentication, and logging.
-4. Add AI document ingestion, retrieval, and evaluation.
+## Migrations and verification
 
-## Documents router
+The initial migration creates documents with UUID primary key, VARCHAR(200) title,
+and TEXT content, all non-null. API startup does not create tables.
+For future entity changes, generate a migration and review it before applying:
 
-`main.py` configures the application and registers the documents router with
-`app.include_router(documents_router)`. `routers/documents.py` groups document
-endpoints. DTOs live in `schemas.py`; storage operations live in `document_service.py`. Its `/documents` prefix applies to every
-route, and its `Documents` tag groups them in Swagger UI. This is the FastAPI
-equivalent of grouping actions in an ASP.NET Core controller; a controller class
-is not required. The run command and endpoint URLs remain the same.
+```powershell
+python -m alembic revision --autogenerate -m "describe change"
+python -m alembic upgrade head
+python -m alembic check
+python -m unittest -v test_documents
+```
 
-## Document service and dependency injection
+Tests use configured PostgreSQL at Alembic head, not SQLite. They verify separate
+request creation/retrieval/listing, fresh-process persistence, 422 validation, 404,
+failed-write rollback and session cleanup. They remove only the rows they create.
+Do not point integration tests at a production database.
 
-`DocumentService` owns create/list/get operations, like an ASP.NET Core service
-called by controller actions. `schemas.py` contains the unchanged Pydantic DTOs,
-so the service does not import the HTTP router. The router retains HTTP concerns,
-including the existing 404 response and response models. The health router is unchanged.
+## PATCH and DELETE
 
-`Annotated[DocumentService, Depends(get_document_service)]` requests injection
-into an endpoint parameter, comparable to a minimal API service parameter or
-`[FromServices]`. FastAPI calls the provider; there is no central DI registration.
-The provider returns a module-level service instance, analogous to
-`AddSingleton<DocumentService>()` for this single-app process.
+`PATCH /documents/{document_id}` accepts a partial object, for example
+`{"title": "Updated policy"}`. Omitted fields remain unchanged. Explicit null,
+empty strings, and titles longer than 200 characters return 422. An empty object
+is a no-op: 200 with the current document, or 404 if absent. Unknown fields are
+ignored, consistent with the existing DTOs; they cannot change the document id.
+This is a partial-object endpoint, not an RFC 6902 JSON Patch operation array.
 
-Service and dictionary lifetimes are both per worker process. Separate requests
-share them. Restarting or development reloading clears them; multiple workers
-have independent stores. Creating a new service inside the provider would create
-new storage each request and lose earlier documents. FastAPI's default dependency
-cache only reuses a provider result within one request; the module-level instance
-provides the cross-request lifetime here. A lock protects dictionary access because
-synchronous endpoints can run concurrently in worker threads.
+`DocumentPatch` uses optional defaults to allow omission, a field validator to
+reject supplied nulls, and `model_dump(exclude_unset=True)` to select only supplied
+fields. This is a presence-aware update DTO, unlike a C# nullable property alone
+which usually cannot distinguish missing JSON from explicit null. No response
+DTO or ORM schema changes are needed.
 
-Tests can replace the provider through `app.dependency_overrides`, comparable to
-replacing a service registration in an ASP.NET Core integration-test host.
+The service loads a tracked entity, applies selected properties, and commits,
+like EF Core property assignment followed by SaveChanges. Failed writes roll back.
+An empty patch performs no write. Session cleanup remains in the yield dependency.
+
+`DELETE /documents/{document_id}` commits deletion before returning a bodyless
+204, comparable to Remove + SaveChanges + NoContent. Missing documents, including
+repeated deletion, return 404 with the existing Document not found detail.
+Invalid UUIDs return 422. No migration is required.
+
+Integration tests cover partial and combined updates, omitted versus null fields,
+empty patches, unchanged data after validation failure, cross-request persistence,
+bodyless deletion, missing documents, and rollback after a failed update.

@@ -1,7 +1,7 @@
 import time
 from functools import wraps
 
-def cache_with_ttl(seconds):
+def cache_with_ttl(seconds,skip_first_arg=True):
     """
     Performance Decorator: Caches function results and automatically
     invalidates entries after a specific number of `seconds`.

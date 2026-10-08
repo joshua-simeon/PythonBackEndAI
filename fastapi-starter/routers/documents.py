@@ -9,8 +9,7 @@ from schemas import DocumentCreate, DocumentPatch, DocumentResponse
 router = APIRouter(prefix="/documents", tags=["Documents"])
 
 
-@router.post("", response_model=DocumentResponse,
-             status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=DocumentResponse, status_code=status.HTTP_201_CREATED)
 def create_document(
     request: DocumentCreate,
     service: Annotated[DocumentService, Depends(get_document_service)],

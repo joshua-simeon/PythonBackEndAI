@@ -46,7 +46,7 @@ class DocumentApiTests(unittest.TestCase):
             self.assertEqual(response.json(), document)
             response = client.get("/documents")
             self.assertEqual(response.status_code, 200)
-            self.assertIn(document, response.json())
+            self.assertIn(document, response.json()["items"])
 
     def test_persistence_in_fresh_api_process(self) -> None:
         document = self.create_document()
@@ -86,7 +86,7 @@ class DocumentApiTests(unittest.TestCase):
         self.assertEqual(response.json(), expected)
         with TestClient(app) as client:
             self.assertEqual(client.get(path).json(), expected)
-            self.assertIn(expected, client.get("/documents").json())
+            self.assertIn(expected, client.get("/documents", params={"title": expected["title"]}).json()["items"])
             response = client.patch(path, json={"content": "New content"})
             self.assertEqual(response.status_code, 200)
             expected["content"] = "New content"
@@ -135,7 +135,7 @@ class DocumentApiTests(unittest.TestCase):
         self.assertEqual(response.content, b"")
         with TestClient(app) as client:
             self.assertEqual(client.get(path).status_code, 404)
-            self.assertNotIn(document, client.get("/documents").json())
+            self.assertNotIn(document, client.get("/documents").json()["items"])
             self.assertEqual(client.delete(path).status_code, 404)
         with SessionLocal() as session:
             self.assertIsNone(session.get(Document, UUID(document["id"])))
@@ -170,6 +170,72 @@ class DocumentApiTests(unittest.TestCase):
         dependency.close()
         self.assertFalse(session.in_transaction())
         self.assertEqual(self.client.get("/health").json(), {"status": "ok"})
+
+
+class DocumentListTests(DocumentApiTests):
+    # Reuse lifecycle helpers without rerunning the CRUD tests.
+    def seed(self, suffixes: list[str]) -> tuple[str, list[dict]]:
+        marker = str(uuid4())
+        documents = []
+        for suffix in suffixes:
+            response = self.client.post(
+                "/documents", json={"title": f"{marker} {suffix}", "content": "list test"},
+            )
+            self.assertEqual(response.status_code, 201)
+            document = response.json()
+            self.ids.append(UUID(document["id"]))
+            documents.append(document)
+        return marker, documents
+
+    def page(self, **params) -> dict:
+        response = self.client.get("/documents", params=params)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(set(response.json()), {"items", "total"})
+        return response.json()
+
+    def test_page_boundaries_and_total(self) -> None:
+        marker, documents = self.seed(["same"] * 5)
+        expected = sorted(documents, key=lambda document: document["id"])
+        for offset in (0, 2, 4, 5, 10):
+            with self.subTest(offset=offset):
+                page = self.page(title=marker, limit=2, offset=offset)
+                self.assertEqual(page["items"], expected[offset:offset + 2])
+                self.assertEqual(page["total"], 5)
+
+    def test_defaults_and_maximum_limit(self) -> None:
+        marker, documents = self.seed(["same"] * 21)
+        expected = sorted(documents, key=lambda document: document["id"])
+        self.assertEqual(self.page(title=marker), {"items": expected[:20], "total": 21})
+        self.assertEqual(self.page(title=marker, limit=100), {"items": expected, "total": 21})
+
+    def test_case_insensitive_substring_and_literal_wildcards(self) -> None:
+        marker, documents = self.seed(["Alpha", "aLPHa", "Beta", "100%_done", "100XYdone"])
+        page = self.page(title=f"{marker} ALPH", limit=1)
+        self.assertEqual(page["total"], 2)
+        self.assertIn(page["items"][0], documents[:2])
+        self.assertEqual(self.page(title=f"{marker} 100%_"), {"items": [documents[3]], "total": 1})
+        self.assertEqual(self.page(title=f"{marker} absent"), {"items": [], "total": 0})
+
+    def test_sorting_and_unique_tie_breaker(self) -> None:
+        marker, documents = self.seed(["Beta", "Alpha", "Alpha", "Gamma"])
+        for field in ("id", "title"):
+            for order in ("asc", "desc"):
+                with self.subTest(field=field, order=order):
+                    expected = sorted(documents, key=lambda document: document["id"])
+                    expected = sorted(expected, key=lambda document: document[field], reverse=order == "desc")
+                    pages = [self.page(title=marker, sort_by=field, sort_order=order,
+                                       limit=1, offset=offset) for offset in range(4)]
+                    self.assertEqual([page["items"][0] for page in pages], expected)
+                    self.assertTrue(all(page["total"] == 4 for page in pages))
+
+    def test_invalid_list_parameters(self) -> None:
+        for params in ({"limit": 0}, {"limit": -1}, {"limit": 101},
+                       {"limit": "abc"}, {"limit": "1.5"}, {"offset": -1},
+                       {"offset": "abc"}, {"offset": "1.5"},
+                       {"sort_by": "content"}, {"sort_by": "title; DROP TABLE documents"},
+                       {"sort_order": "invalid"}):
+            with self.subTest(params=params):
+                self.assertEqual(self.client.get("/documents", params=params).status_code, 422)
 
 
 if __name__ == "__main__":

@@ -78,7 +78,7 @@ For future entity changes, generate a migration and review it before applying:
 python -m alembic revision --autogenerate -m "describe change"
 python -m alembic upgrade head
 python -m alembic check
-python -m unittest -v test_documents
+python -m unittest discover -s test -p "test_documents.py" -v
 ```
 
 Tests use configured PostgreSQL at Alembic head, not SQLite. They verify separate

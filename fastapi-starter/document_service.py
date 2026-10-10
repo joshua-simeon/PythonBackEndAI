@@ -3,12 +3,13 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import Depends
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from database import get_session
 from models import Document
-from schemas import DocumentCreate, DocumentPatch, DocumentResponse
+from schemas import (DocumentCreate, DocumentListResponse, DocumentPatch,
+                     DocumentResponse, DocumentSortField, SortOrder)
 #from helper.memoization import memoize
 #from helper.measureit import time_it
 from helper.cache_with_ttl import cache_with_ttl
@@ -26,12 +27,35 @@ class DocumentService:
             raise
         return self._response(document)
 
-    def list(self) -> list[DocumentResponse]:
-        documents = self._session.scalars(select(Document)).all()
-        return [self._response(document) for document in documents]
+    def list(
+        self, *, limit: int = 20, offset: int = 0, title: str | None = None,
+        sort_by: DocumentSortField = "id", sort_order: SortOrder = "asc",
+    ) -> DocumentListResponse:
+        columns = {"id": Document.id, "title": Document.title}
+        if not 1 <= limit <= 100 or offset < 0:
+            raise ValueError("limit must be between 1 and 100; offset must be nonnegative")
+        if sort_by not in columns or sort_order not in ("asc", "desc"):
+            raise ValueError("Unsupported document sorting")
+        predicates = []
+        if title is not None:
+            predicates.append(Document.title.icontains(title, autoescape=True))
+        total = self._session.scalar(
+            select(func.count()).select_from(Document).where(*predicates)
+        )
+        column = columns[sort_by]
+        ordering = [column.desc() if sort_order == "desc" else column.asc()]
+        if sort_by != "id":
+            ordering.append(Document.id.asc())
+        documents = self._session.scalars(
+            select(Document).where(*predicates).order_by(*ordering)
+            .limit(limit).offset(offset)
+        ).all()
+        return DocumentListResponse(
+            items=[self._response(document) for document in documents], total=total,
+        )
     #@memoize
     #@time_it
-    @cache_with_ttl(seconds=30.0)
+    #@cache_with_ttl(seconds=30.0)
     def get(self, document_id: UUID) -> DocumentResponse | None:
         document = self._session.get(Document, document_id)
         time.sleep(2)  # Simulate a delay for demonstration purposes

@@ -1,10 +1,11 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 
 from document_service import DocumentService, get_document_service
-from schemas import DocumentCreate, DocumentPatch, DocumentResponse
+from schemas import (DocumentCreate, DocumentListResponse, DocumentPatch,
+                     DocumentResponse, DocumentSortField, SortOrder)
 
 router = APIRouter(prefix="/documents", tags=["Documents"])
 
@@ -17,11 +18,17 @@ def create_document(
     return service.create(request)
 
 
-@router.get("", response_model=list[DocumentResponse])
+@router.get("", response_model=DocumentListResponse)
 def list_documents(
     service: Annotated[DocumentService, Depends(get_document_service)],
-) -> list[DocumentResponse]:
-    return service.list()
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    title: str | None = None,
+    sort_by: DocumentSortField = "id",
+    sort_order: SortOrder = "asc",
+) -> DocumentListResponse:
+    return service.list(limit=limit, offset=offset, title=title,
+                        sort_by=sort_by, sort_order=sort_order)
 
 
 @router.get("/{document_id}", response_model=DocumentResponse)

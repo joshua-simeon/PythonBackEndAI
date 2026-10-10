@@ -1,4 +1,5 @@
 from uuid import UUID
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -10,6 +11,15 @@ class DocumentCreate(BaseModel):
 
 class DocumentResponse(DocumentCreate):
     id: UUID
+
+
+DocumentSortField = Literal["id", "title"]
+SortOrder = Literal["asc", "desc"]
+
+
+class DocumentListResponse(BaseModel):
+    items: list[DocumentResponse]
+    total: int
 
 
 class DocumentPatch(BaseModel):
